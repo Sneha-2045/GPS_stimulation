@@ -1,1468 +1,1068 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-from sklearn.neighbors import NearestNeighbors
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, accuracy_score, precision_score, f1_score
 import math
+import time
+import random
+from math import sqrt, atan2, degrees
+from sklearn.neighbors import NearestNeighbors
 import plotly.graph_objects as go
-from math import sqrt
+from plotly.subplots import make_subplots
+import cv2
+from PIL import Image
+import io
+import base64
+import threading
+
+# YOLOv8 imports (with fallback if not installed)
+YOLO_MODEL = None
+YOLO_AVAILABLE = False
+
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+    # Load model once at startup
+    try:
+        YOLO_MODEL = YOLO('yolov8n.pt')  # nano model for speed
+        st.session_state.yolo_loaded = True
+    except Exception as e:
+        st.session_state.yolo_loaded = False
+        st.session_state.yolo_error = str(e)
+except ImportError:
+    YOLO_AVAILABLE = False
 
 # Page configuration
-st.set_page_config(page_title="Thapar Auto Optimization", layout="wide")
+st.set_page_config(
+    page_title="AI Drone Fleet System",
+    page_icon="🚁",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Enhanced Custom CSS for modern UI
+st.markdown("""
+<style>
+    .main-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 2rem;
+        border-radius: 15px;
+        color: white;
+        text-align: center;
+        margin-bottom: 2rem;
+        box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+    }
+    .metric-card {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        padding: 1.5rem;
+        border-radius: 12px;
+        color: white;
+        text-align: center;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        margin-bottom: 1rem;
+    }
+    .stButton>button {
+        width: 100%;
+        border-radius: 10px;
+        font-weight: bold;
+        transition: all 0.3s;
+    }
+    .stButton>button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    .drone-card {
+        background: white;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 4px solid #667eea;
+        margin-bottom: 0.5rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # Initialize session state
-if 'student_frequency' not in st.session_state:
-    st.session_state.student_frequency = {
-        'COS': 7,
-        'Hostel A': 5,
-        'Library': 4,
-        'Jaggi': 0,
-        'PG': 0,
-        'O Block': 0,
-        'B Block': 0,
-        'Dispensary': 0
-    }
-
-if 'auto_positions' not in st.session_state:
-    st.session_state.auto_positions = [
-        {'id': 1, 'x': 100, 'y': 150, 'capacity': 4, 'passengers': 0},
-        {'id': 2, 'x': 300, 'y': 200, 'capacity': 4, 'passengers': 0},
-        {'id': 3, 'x': 500, 'y': 100, 'capacity': 4, 'passengers': 0}
+if 'drones' not in st.session_state:
+    st.session_state.drones = [
+        {'id': 1, 'x': 100, 'y': 150, 'status': 'idle', 'battery': 100, 'payload': 0, 'target': None, 'route': [], 'current_step': 0},
+        {'id': 2, 'x': 300, 'y': 200, 'status': 'idle', 'battery': 95, 'payload': 0, 'target': None, 'route': [], 'current_step': 0},
+        {'id': 3, 'x': 500, 'y': 100, 'status': 'idle', 'battery': 90, 'payload': 0, 'target': None, 'route': [], 'current_step': 0}
     ]
 
-# Location coordinates (for visualization)
-LOCATIONS = {
-    'COS': {'x': 150, 'y': 250, 'image': '📚'},
-    'Hostel A': {'x': 350, 'y': 300, 'image': '🏠'},
-    'Library': {'x': 550, 'y': 200, 'image': '📖'},
-    'Jaggi': {'x': 200, 'y': 400, 'image': '🏢'},
-    'PG': {'x': 400, 'y': 450, 'image': '🏘️'},
-    'O Block': {'x': 600, 'y': 350, 'image': '🏛️'},
-    'B Block': {'x': 250, 'y': 500, 'image': '🏛️'},
-    'Dispensary': {'x': 450, 'y': 550, 'image': '🏥'}
+if 'tasks' not in st.session_state:
+    st.session_state.tasks = [
+        {'id': 1, 'location': 'Building A', 'priority': 'high', 'type': 'delivery', 'status': 'pending'},
+        {'id': 2, 'location': 'Building B', 'priority': 'medium', 'type': 'surveillance', 'status': 'pending'},
+        {'id': 3, 'location': 'Building C', 'priority': 'low', 'type': 'delivery', 'status': 'pending'}
+    ]
+
+if 'detection_history' not in st.session_state:
+    st.session_state.detection_history = []
+
+if 'simulation_running' not in st.session_state:
+    st.session_state.simulation_running = False
+
+if 'animation_frame' not in st.session_state:
+    st.session_state.animation_frame = 0
+
+if 'last_update_time' not in st.session_state:
+    st.session_state.last_update_time = time.time()
+
+if 'yolo_model_ready' not in st.session_state:
+    st.session_state.yolo_model_ready = False
+
+# Campus locations
+CAMPUS_LOCATIONS = {
+    'Building A': {'x': 150, 'y': 250, 'type': 'building', 'icon': '🏢'},
+    'Building B': {'x': 350, 'y': 300, 'type': 'building', 'icon': '🏛️'},
+    'Building C': {'x': 550, 'y': 200, 'type': 'building', 'icon': '🏗️'},
+    'Parking Lot': {'x': 200, 'y': 400, 'type': 'parking', 'icon': '🅿️'},
+    'Quad': {'x': 400, 'y': 450, 'type': 'open', 'icon': '🌳'},
+    'Library': {'x': 600, 'y': 350, 'type': 'building', 'icon': '📚'},
+    'Cafeteria': {'x': 250, 'y': 500, 'type': 'building', 'icon': '🍽️'},
+    'Sports Center': {'x': 450, 'y': 550, 'type': 'building', 'icon': '⚽'}
 }
 
 def calculate_distance(x1, y1, x2, y2):
     """Calculate Euclidean distance between two points"""
     return sqrt((x2 - x1)**2 + (y2 - y1)**2)
 
-def find_empty_position(autos, locations, min_distance=80):
-    """Find an empty position that doesn't collide with existing buildings or autos"""
-    occupied_positions = []
-    
-    # Get ALL location positions (not just active ones)
-    for loc_name, loc_data in LOCATIONS.items():
-        occupied_positions.append((loc_data['x'], loc_data['y']))
-    
-    # Get all auto positions
-    for auto in autos:
-        occupied_positions.append((auto['x'], auto['y']))
-    
-    # Try different positions in a grid pattern
-    grid_size = 100  # Grid spacing
-    for y in range(50, 600, grid_size):
-        for x in range(50, 700, grid_size):
-            # Check if this position is far enough from all occupied positions
-            is_empty = True
-            for occ_x, occ_y in occupied_positions:
-                dist = calculate_distance(x, y, occ_x, occ_y)
-                if dist < min_distance:
-                    is_empty = False
-                    break
-            
-            if is_empty:
-                return x, y
-    
-    # If no position found in grid, try random positions
-    import random
-    for _ in range(100):
-        x = random.randint(50, 650)
-        y = random.randint(50, 550)
-        is_empty = True
-        for occ_x, occ_y in occupied_positions:
-            dist = calculate_distance(x, y, occ_x, occ_y)
-            if dist < min_distance:
-                is_empty = False
-                break
-        if is_empty:
-            return x, y
-    
-    # Fallback: return a position far from center
-    return 600, 50
+def calculate_angle(x1, y1, x2, y2):
+    """Calculate angle between two points in degrees"""
+    return degrees(atan2(y2 - y1, x2 - x1))
 
-def knn_auto_assignment(autos, locations):
-    """Assign autos to locations using KNN with route optimization"""
+# ==================== OPTIMIZATION ALGORITHMS ====================
+
+def knn_route_optimization(drones, destinations):
+    """KNN-based route optimization"""
     assignments = []
+    remaining_destinations = destinations.copy()
     
-    # Create a copy of locations dict to track remaining students
-    remaining_students = locations.copy()
-    
-    # Prepare auto positions
-    auto_coords = [(auto['x'], auto['y']) for auto in autos]
-    
-    if len(auto_coords) == 0:
+    if not drones or not destinations:
         return assignments
     
-    # Use KNN to find nearest autos for each location
-    nbrs = NearestNeighbors(n_neighbors=len(auto_coords), algorithm='ball_tree')
-    nbrs.fit(auto_coords)
+    # Prepare drone positions
+    drone_coords = [(d['x'], d['y']) for d in drones if d['status'] == 'idle']
     
-    # Sort locations by student count (descending) to prioritize high-demand areas
-    sorted_locations = sorted(remaining_students.items(), key=lambda x: x[1], reverse=True)
-    
-    for loc_name, count in sorted_locations:
-        if count <= 0:
-            continue
-            
-        loc_coord = [LOCATIONS[loc_name]['x'], LOCATIONS[loc_name]['y']]
-        distances, indices = nbrs.kneighbors([loc_coord])
-        
-        # Try to assign students to nearest autos
-        for idx, auto_idx in enumerate(indices[0]):
-            if count <= 0:
-                break
-                
-            auto = autos[auto_idx]
-            remaining_capacity = auto['capacity'] - auto['passengers']
-            
-            if remaining_capacity > 0:
-                students_to_pick = min(remaining_capacity, count)
-                
-                assignments.append({
-                    'auto_id': auto['id'],
-                    'location': loc_name,
-                    'students': students_to_pick,
-                    'distance': distances[0][idx],
-                    'auto_x': auto['x'],
-                    'auto_y': auto['y'],
-                    'loc_x': LOCATIONS[loc_name]['x'],
-                    'loc_y': LOCATIONS[loc_name]['y']
-                })
-                
-                # Update auto passengers and remaining students
-                auto['passengers'] += students_to_pick
-                count -= students_to_pick
-                remaining_students[loc_name] = count
-    
-    return assignments
-
-def random_forest_assignment(autos, locations):
-    """Assign autos using Random Forest-based distance prediction"""
-    assignments = []
-    remaining_students = locations.copy()
-    auto_coords = [(auto['x'], auto['y']) for auto in autos]
-    
-    if len(auto_coords) == 0:
+    if not drone_coords:
         return assignments
     
-    # RF-based: Prioritize by predicted demand (higher students first)
-    # Then use distance-weighted assignment
-    sorted_locations = sorted(remaining_students.items(), key=lambda x: x[1], reverse=True)
+    nbrs = NearestNeighbors(n_neighbors=min(len(drone_coords), len(destinations)), algorithm='ball_tree')
+    nbrs.fit(drone_coords)
     
-    for loc_name, count in sorted_locations:
-        if count <= 0:
+    for dest_name, dest_data in remaining_destinations.items():
+        if dest_name not in CAMPUS_LOCATIONS:
             continue
         
-        # Calculate distances to all autos
-        loc_coord = [LOCATIONS[loc_name]['x'], LOCATIONS[loc_name]['y']]
-        distances_to_autos = []
-        for auto in autos:
-            dist = calculate_distance(auto['x'], auto['y'], loc_coord[0], loc_coord[1])
-            distances_to_autos.append((dist, auto))
+        loc = CAMPUS_LOCATIONS[dest_name]
+        distances, indices = nbrs.kneighbors([[loc['x'], loc['y']]])
         
-        # Sort by distance (RF prefers closer autos)
-        distances_to_autos.sort(key=lambda x: x[0])
-        
-        for dist, auto in distances_to_autos:
-            if count <= 0:
-                break
-            
-            remaining_capacity = auto['capacity'] - auto['passengers']
-            if remaining_capacity > 0:
-                students_to_pick = min(remaining_capacity, count)
+        for idx, drone_idx in enumerate(indices[0]):
+            if drone_idx < len(drones) and drones[drone_idx]['status'] == 'idle':
+                drone = drones[drone_idx]
+                dist = distances[0][idx]
+                
                 assignments.append({
-                    'auto_id': auto['id'],
-                    'location': loc_name,
-                    'students': students_to_pick,
+                    'drone_id': drone['id'],
+                    'destination': dest_name,
                     'distance': dist,
-                    'auto_x': auto['x'],
-                    'auto_y': auto['y'],
-                    'loc_x': LOCATIONS[loc_name]['x'],
-                    'loc_y': LOCATIONS[loc_name]['y']
+                    'drone_x': drone['x'],
+                    'drone_y': drone['y'],
+                    'dest_x': loc['x'],
+                    'dest_y': loc['y']
                 })
-                auto['passengers'] += students_to_pick
-                count -= students_to_pick
-                remaining_students[loc_name] = count
+                drones[drone_idx]['status'] = 'assigned'
+                break
     
     return assignments
 
-def linear_regression_assignment(autos, locations):
-    """Assign autos using Linear Regression-based optimization"""
+def dijkstra_route_optimization(drones, destinations):
+    """Dijkstra's algorithm for shortest path optimization"""
     assignments = []
-    remaining_students = locations.copy()
-    auto_coords = [(auto['x'], auto['y']) for auto in autos]
+    remaining_destinations = destinations.copy()
     
-    if len(auto_coords) == 0:
+    if not drones or not destinations:
         return assignments
     
-    # LR-based: Optimize for minimum total distance
-    # Assign students to autos that minimize total travel distance
+    # Create graph of all possible assignments
     all_assignments = []
-    for loc_name, count in remaining_students.items():
-        if count <= 0:
-            continue
-        loc_coord = [LOCATIONS[loc_name]['x'], LOCATIONS[loc_name]['y']]
-        
-        for auto in autos:
-            dist = calculate_distance(auto['x'], auto['y'], loc_coord[0], loc_coord[1])
-            all_assignments.append((dist, auto, loc_name, count))
     
-    # Sort by distance (LR minimizes total distance)
+    for dest_name, dest_data in remaining_destinations.items():
+        if dest_name not in CAMPUS_LOCATIONS:
+            continue
+        
+        loc = CAMPUS_LOCATIONS[dest_name]
+        
+        for drone in drones:
+            if drone['status'] == 'idle':
+                dist = calculate_distance(drone['x'], drone['y'], loc['x'], loc['y'])
+                # Priority score: distance + battery penalty
+                priority = dist + (100 - drone['battery']) * 0.5
+                all_assignments.append((priority, dist, drone, dest_name, loc))
+    
+    # Sort by priority (Dijkstra: shortest path first)
     all_assignments.sort(key=lambda x: x[0])
     
-    for dist, auto, loc_name, orig_count in all_assignments:
-        if remaining_students[loc_name] <= 0:
+    assigned_drones = set()
+    for priority, dist, drone, dest_name, loc in all_assignments:
+        if drone['id'] in assigned_drones:
+            continue
+        if dest_name not in remaining_destinations:
             continue
         
-        remaining_capacity = auto['capacity'] - auto['passengers']
-        if remaining_capacity > 0:
-            students_to_pick = min(remaining_capacity, remaining_students[loc_name])
-            assignments.append({
-                'auto_id': auto['id'],
-                'location': loc_name,
-                'students': students_to_pick,
-                'distance': dist,
-                'auto_x': auto['x'],
-                'auto_y': auto['y'],
-                'loc_x': LOCATIONS[loc_name]['x'],
-                'loc_y': LOCATIONS[loc_name]['y']
-            })
-            auto['passengers'] += students_to_pick
-            remaining_students[loc_name] -= students_to_pick
+        assignments.append({
+            'drone_id': drone['id'],
+            'destination': dest_name,
+            'distance': dist,
+            'drone_x': drone['x'],
+            'drone_y': drone['y'],
+            'dest_x': loc['x'],
+            'dest_y': loc['y']
+        })
+        assigned_drones.add(drone['id'])
+        if dest_name in remaining_destinations:
+            del remaining_destinations[dest_name]
     
     return assignments
 
-def gradient_boosting_assignment(autos, locations):
-    """Assign autos using Gradient Boosting-based efficiency optimization"""
+def genetic_algorithm_optimization(drones, destinations):
+    """Genetic Algorithm for evolutionary route optimization"""
     assignments = []
-    remaining_students = locations.copy()
-    auto_coords = [(auto['x'], auto['y']) for auto in autos]
     
-    if len(auto_coords) == 0:
+    if not drones or not destinations:
         return assignments
     
-    # GB-based: Balance distance and capacity utilization
-    # Prioritize assignments that maximize efficiency (students/distance ratio)
-    efficiency_scores = []
-    for loc_name, count in remaining_students.items():
-        if count <= 0:
-            continue
-        loc_coord = [LOCATIONS[loc_name]['x'], LOCATIONS[loc_name]['y']]
-        
-        for auto in autos:
-            dist = calculate_distance(auto['x'], auto['y'], loc_coord[0], loc_coord[1])
-            remaining_capacity = auto['capacity'] - auto['passengers']
-            if remaining_capacity > 0:
-                # Efficiency = students that can be picked / distance
-                students_possible = min(remaining_capacity, count)
-                efficiency = students_possible / (dist + 1)  # +1 to avoid division by zero
-                efficiency_scores.append((efficiency, dist, auto, loc_name, students_possible))
-    
-    # Sort by efficiency (GB maximizes efficiency)
-    efficiency_scores.sort(key=lambda x: x[0], reverse=True)
-    
-    for efficiency, dist, auto, loc_name, students_possible in efficiency_scores:
-        if remaining_students[loc_name] <= 0:
-            continue
-        
-        remaining_capacity = auto['capacity'] - auto['passengers']
-        if remaining_capacity > 0:
-            students_to_pick = min(remaining_capacity, remaining_students[loc_name])
-            assignments.append({
-                'auto_id': auto['id'],
-                'location': loc_name,
-                'students': students_to_pick,
-                'distance': dist,
-                'auto_x': auto['x'],
-                'auto_y': auto['y'],
-                'loc_x': LOCATIONS[loc_name]['x'],
-                'loc_y': LOCATIONS[loc_name]['y']
-            })
-            auto['passengers'] += students_to_pick
-            remaining_students[loc_name] -= students_to_pick
-    
-    return assignments
-
-def dijkstra_assignment(autos, locations):
-    """Assign autos using Dijkstra's Algorithm for shortest path optimization"""
-    assignments = []
-    remaining_students = locations.copy()
-    
-    if len(autos) == 0:
-        return assignments
-    
-    # Dijkstra-based: Find optimal paths by considering all possible routes
-    # Prioritize shortest path while maximizing capacity utilization
-    all_potential_assignments = []
-    
-    for loc_name, count in remaining_students.items():
-        if count <= 0:
-            continue
-        loc_coord = [LOCATIONS[loc_name]['x'], LOCATIONS[loc_name]['y']]
-        
-        for auto in autos:
-            dist = calculate_distance(auto['x'], auto['y'], loc_coord[0], loc_coord[1])
-            remaining_capacity = auto['capacity'] - auto['passengers']
-            if remaining_capacity > 0:
-                # Dijkstra considers: distance priority + capacity utilization
-                priority_score = dist * 0.7 + (4 - remaining_capacity) * 10  # Prefer autos with more passengers
-                all_potential_assignments.append((priority_score, dist, auto, loc_name, count))
-    
-    # Sort by priority (lower is better for Dijkstra)
-    all_potential_assignments.sort(key=lambda x: x[0])
-    
-    for priority_score, dist, auto, loc_name, count in all_potential_assignments:
-        if remaining_students[loc_name] <= 0:
-            continue
-        
-        remaining_capacity = auto['capacity'] - auto['passengers']
-        if remaining_capacity > 0:
-            students_to_pick = min(remaining_capacity, remaining_students[loc_name])
-            assignments.append({
-                'auto_id': auto['id'],
-                'location': loc_name,
-                'students': students_to_pick,
-                'distance': dist,
-                'auto_x': auto['x'],
-                'auto_y': auto['y'],
-                'loc_x': LOCATIONS[loc_name]['x'],
-                'loc_y': LOCATIONS[loc_name]['y']
-            })
-            auto['passengers'] += students_to_pick
-            remaining_students[loc_name] -= students_to_pick
-    
-    return assignments
-
-def genetic_algorithm_assignment(autos, locations):
-    """Assign autos using Genetic Algorithm - evolutionary optimization"""
-    assignments = []
-    remaining_students = locations.copy()
-    
-    if len(autos) == 0:
-        return assignments
-    
-    # Genetic Algorithm: Evolutionary approach to optimize assignments
-    # Creates multiple candidate solutions and evolves them
-    def fitness_score(assignment_list):
-        """Calculate fitness: minimize distance while maximizing students picked"""
+    def fitness(assignment_list):
+        """Fitness function: minimize total distance"""
         total_dist = sum(a['distance'] for a in assignment_list)
-        total_students = sum(a['students'] for a in assignment_list)
-        return total_students * 1000 - total_dist  # Higher is better
+        return 10000 - total_dist  # Higher is better
     
-    # Generate initial population of assignment strategies
-    candidate_solutions = []
-    for _ in range(3):  # Multiple candidate solutions
-        temp_assignments = []
-        temp_autos = [{'id': a['id'], 'x': a['x'], 'y': a['y'], 'capacity': a['capacity'], 'passengers': 0} for a in autos]
-        temp_students = remaining_students.copy()
+    # Generate initial population
+    population = []
+    for _ in range(5):
+        candidate = []
+        temp_drones = [d for d in drones if d['status'] == 'idle']
+        temp_dests = list(destinations.keys())
+        random.shuffle(temp_dests)
         
-        # Sort locations by distance to nearest auto (mutation strategy)
-        loc_distances = []
-        for loc_name, count in temp_students.items():
-            if count > 0:
-                loc_coord = [LOCATIONS[loc_name]['x'], LOCATIONS[loc_name]['y']]
-                min_dist = min([calculate_distance(a['x'], a['y'], loc_coord[0], loc_coord[1]) for a in temp_autos])
-                loc_distances.append((min_dist + np.random.random() * 50, loc_name, count))  # Add randomness
-        
-        loc_distances.sort(key=lambda x: x[0])
-        
-        for min_dist, loc_name, count in loc_distances:
-            if count <= 0:
+        for dest_name in temp_dests[:len(temp_drones)]:
+            if dest_name not in CAMPUS_LOCATIONS:
                 continue
-            loc_coord = [LOCATIONS[loc_name]['x'], LOCATIONS[loc_name]['y']]
+            loc = CAMPUS_LOCATIONS[dest_name]
             
-            # Find best auto (selection pressure)
-            best_auto = None
-            best_dist = float('inf')
-            for auto in temp_autos:
-                if auto['passengers'] < auto['capacity']:
-                    dist = calculate_distance(auto['x'], auto['y'], loc_coord[0], loc_coord[1])
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_auto = auto
-            
-            if best_auto:
-                students_to_pick = min(best_auto['capacity'] - best_auto['passengers'], count)
-                temp_assignments.append({
-                    'auto_id': best_auto['id'],
-                    'location': loc_name,
-                    'students': students_to_pick,
-                    'distance': best_dist,
-                    'auto_x': best_auto['x'],
-                    'auto_y': best_auto['y'],
-                    'loc_x': LOCATIONS[loc_name]['x'],
-                    'loc_y': LOCATIONS[loc_name]['y']
+            if temp_drones:
+                drone = min(temp_drones, key=lambda d: calculate_distance(d['x'], d['y'], loc['x'], loc['y']))
+                dist = calculate_distance(drone['x'], drone['y'], loc['x'], loc['y'])
+                candidate.append({
+                    'drone_id': drone['id'],
+                    'destination': dest_name,
+                    'distance': dist,
+                    'drone_x': drone['x'],
+                    'drone_y': drone['y'],
+                    'dest_x': loc['x'],
+                    'dest_y': loc['y']
                 })
-                best_auto['passengers'] += students_to_pick
-                temp_students[loc_name] -= students_to_pick
+                temp_drones.remove(drone)
         
-        candidate_solutions.append((fitness_score(temp_assignments), temp_assignments))
+        if candidate:
+            population.append((fitness(candidate), candidate))
     
-    # Select best solution (survival of fittest)
-    candidate_solutions.sort(key=lambda x: x[0], reverse=True)
-    assignments = candidate_solutions[0][1] if candidate_solutions else []
-    
-    # Update actual autos
-    for a in assignments:
-        for auto in autos:
-            if auto['id'] == a['auto_id']:
-                auto['passengers'] += a['students']
-                break
+    # Select best solution
+    if population:
+        population.sort(key=lambda x: x[0], reverse=True)
+        assignments = population[0][1]
     
     return assignments
 
-def particle_swarm_assignment(autos, locations):
-    """Assign autos using Particle Swarm Optimization - swarm intelligence"""
+def particle_swarm_optimization(drones, destinations):
+    """Particle Swarm Optimization for route planning"""
     assignments = []
-    remaining_students = locations.copy()
     
-    if len(autos) == 0:
+    if not drones or not destinations:
         return assignments
     
-    # PSO: Swarm-based optimization with velocity and position updates
-    # Each "particle" represents an assignment strategy
+    # Initialize swarm
     particles = []
-    
-    # Initialize swarm of particles
-    for _ in range(5):  # 5 particles in swarm
+    for _ in range(5):
         particle_assignments = []
-        temp_autos = [{'id': a['id'], 'x': a['x'], 'y': a['y'], 'capacity': a['capacity'], 'passengers': 0} for a in autos]
-        temp_students = remaining_students.copy()
+        temp_drones = [d for d in drones if d['status'] == 'idle']
+        temp_dests = list(destinations.keys())
+        random.shuffle(temp_dests)
         
-        # PSO velocity influences assignment order
-        loc_list = list(temp_students.items())
-        np.random.shuffle(loc_list)  # Random velocity
-        
-        for loc_name, count in loc_list:
-            if count <= 0:
+        for dest_name in temp_dests[:len(temp_drones)]:
+            if dest_name not in CAMPUS_LOCATIONS:
                 continue
-            loc_coord = [LOCATIONS[loc_name]['x'], LOCATIONS[loc_name]['y']]
+            loc = CAMPUS_LOCATIONS[dest_name]
             
-            # Find best auto using PSO behavior (social + cognitive component)
-            best_auto = None
-            best_score = float('inf')
-            
-            for auto in temp_autos:
-                if auto['passengers'] < auto['capacity']:
-                    dist = calculate_distance(auto['x'], auto['y'], loc_coord[0], loc_coord[1])
-                    # PSO score: distance + capacity utilization
-                    score = dist * 0.8 + (auto['capacity'] - auto['passengers']) * 2
+            if temp_drones:
+                # PSO: balance distance and battery
+                best_drone = None
+                best_score = float('inf')
+                
+                for drone in temp_drones:
+                    dist = calculate_distance(drone['x'], drone['y'], loc['x'], loc['y'])
+                    score = dist * 0.7 + (100 - drone['battery']) * 0.3
                     if score < best_score:
                         best_score = score
-                        best_auto = auto
-            
-            if best_auto:
-                students_to_pick = min(best_auto['capacity'] - best_auto['passengers'], count)
-                particle_assignments.append({
-                    'auto_id': best_auto['id'],
-                    'location': loc_name,
-                    'students': students_to_pick,
-                    'distance': calculate_distance(best_auto['x'], best_auto['y'], loc_coord[0], loc_coord[1]),
-                    'auto_x': best_auto['x'],
-                    'auto_y': best_auto['y'],
-                    'loc_x': LOCATIONS[loc_name]['x'],
-                    'loc_y': LOCATIONS[loc_name]['y']
-                })
-                best_auto['passengers'] += students_to_pick
-                temp_students[loc_name] -= students_to_pick
+                        best_drone = drone
+                
+                if best_drone:
+                    dist = calculate_distance(best_drone['x'], best_drone['y'], loc['x'], loc['y'])
+                    particle_assignments.append({
+                        'drone_id': best_drone['id'],
+                        'destination': dest_name,
+                        'distance': dist,
+                        'drone_x': best_drone['x'],
+                        'drone_y': best_drone['y'],
+                        'dest_x': loc['x'],
+                        'dest_y': loc['y']
+                    })
+                    temp_drones.remove(best_drone)
         
         total_dist = sum(a['distance'] for a in particle_assignments)
-        total_students_picked = sum(a['students'] for a in particle_assignments)
-        fitness = total_students_picked * 100 - total_dist  # Fitness function
+        fitness = 10000 - total_dist
         particles.append((fitness, particle_assignments))
     
-    # Global best selection (swarm converges to best solution)
-    particles.sort(key=lambda x: x[0], reverse=True)
-    assignments = particles[0][1] if particles else []
-    
-    # Update actual autos
-    for a in assignments:
-        for auto in autos:
-            if auto['id'] == a['auto_id']:
-                auto['passengers'] += a['students']
-                break
+    # Global best
+    if particles:
+        particles.sort(key=lambda x: x[0], reverse=True)
+        assignments = particles[0][1]
     
     return assignments
 
-def simulated_annealing_assignment(autos, locations):
-    """Assign autos using Simulated Annealing - probabilistic optimization"""
-    assignments = []
-    remaining_students = locations.copy()
+def ensemble_optimization(drones, destinations):
+    """Ensemble model combining multiple algorithms"""
+    # Get results from all models
+    knn_result = knn_route_optimization([d.copy() for d in drones], destinations.copy())
+    dijkstra_result = dijkstra_route_optimization([d.copy() for d in drones], destinations.copy())
+    ga_result = genetic_algorithm_optimization([d.copy() for d in drones], destinations.copy())
+    pso_result = particle_swarm_optimization([d.copy() for d in drones], destinations.copy())
     
-    if len(autos) == 0:
-        return assignments
-    
-    # Simulated Annealing: Start with initial solution and improve through random changes
-    initial_temp = 1000
-    cooling_rate = 0.95
-    min_temp = 1
-    
-    # Initial solution: greedy assignment
-    best_assignments = []
-    best_autos = [{'id': a['id'], 'x': a['x'], 'y': a['y'], 'capacity': a['capacity'], 'passengers': 0} for a in autos]
-    best_students = remaining_students.copy()
-    
-    # Greedy initial solution
-    sorted_locs = sorted(best_students.items(), key=lambda x: x[1], reverse=True)
-    for loc_name, count in sorted_locs:
-        if count <= 0:
-            continue
-        loc_coord = [LOCATIONS[loc_name]['x'], LOCATIONS[loc_name]['y']]
-        
-        min_dist = float('inf')
-        best_auto = None
-        for auto in best_autos:
-            if auto['passengers'] < auto['capacity']:
-                dist = calculate_distance(auto['x'], auto['y'], loc_coord[0], loc_coord[1])
-                if dist < min_dist:
-                    min_dist = dist
-                    best_auto = auto
-        
-        if best_auto:
-            students_to_pick = min(best_auto['capacity'] - best_auto['passengers'], count)
-            best_assignments.append({
-                'auto_id': best_auto['id'],
-                'location': loc_name,
-                'students': students_to_pick,
-                'distance': min_dist,
-                'auto_x': best_auto['x'],
-                'auto_y': best_auto['y'],
-                'loc_x': LOCATIONS[loc_name]['x'],
-                'loc_y': LOCATIONS[loc_name]['y']
-            })
-            best_auto['passengers'] += students_to_pick
-            best_students[loc_name] -= students_to_pick
-    
-    best_cost = sum(a['distance'] for a in best_assignments)
-    
-    # Simulated Annealing: Accept worse solutions with probability (exploration)
-    current_temp = initial_temp
-    while current_temp > min_temp:
-        # Generate neighbor solution (random swap)
-        if len(best_assignments) > 1:
-            neighbor_assignments = best_assignments.copy()
-            # Small random modification
-            idx1, idx2 = np.random.choice(len(neighbor_assignments), 2, replace=False)
-            neighbor_assignments[idx1], neighbor_assignments[idx2] = neighbor_assignments[idx2], neighbor_assignments[idx1]
-            
-            neighbor_cost = sum(a['distance'] for a in neighbor_assignments)
-            cost_diff = neighbor_cost - best_cost
-            
-            # Accept if better or with probability (metropolis criterion)
-            if cost_diff < 0 or np.random.random() < math.exp(-cost_diff / current_temp):
-                best_assignments = neighbor_assignments
-                best_cost = neighbor_cost
-        
-        current_temp *= cooling_rate
-    
-    assignments = best_assignments
-    
-    # Update actual autos
-    for a in assignments:
-        for auto in autos:
-            if auto['id'] == a['auto_id']:
-                auto['passengers'] += a['students']
-                break
-    
-    return assignments
-
-def ensemble_model_assignment(autos, locations):
-    """Ensemble Model: Combines top 5 models using weighted voting"""
-    assignments = []
-    remaining_students = locations.copy()
-    
-    if len(autos) == 0:
-        return assignments
-    
-    # Select top 5 models for ensemble
-    # Best performing models based on typical performance: KNN, Random Forest, Gradient Boosting, Dijkstra, Linear Regression
-    ensemble_models = [
-        ("KNN (Nearest Neighbors)", knn_auto_assignment, 0.25),
-        ("Random Forest", random_forest_assignment, 0.20),
-        ("Gradient Boosting", gradient_boosting_assignment, 0.20),
-        ("Dijkstra's Algorithm", dijkstra_assignment, 0.20),
-        ("Linear Regression", linear_regression_assignment, 0.15)
+    # Weighted voting
+    all_results = [
+        (knn_result, 0.3),
+        (dijkstra_result, 0.3),
+        (ga_result, 0.2),
+        (pso_result, 0.2)
     ]
     
-    # Get assignments from each model
-    all_model_assignments = []
-    model_weights = []
-    
-    for model_name, model_func, weight in ensemble_models:
-        # Create fresh copy of autos for each model
-        temp_autos = []
-        for auto in autos:
-            temp_autos.append({
-                'id': auto['id'],
-                'x': auto['x'],
-                'y': auto['y'],
-                'capacity': auto['capacity'],
-                'passengers': 0
-            })
-        
-        model_assignments = model_func(temp_autos, remaining_students.copy())
-        all_model_assignments.append(model_assignments)
-        model_weights.append(weight)
-    
-    # Ensemble: Weighted voting based on assignment quality
-    # For each location, find the best assignment from all models
-    ensemble_scores = {}
-    
-    for idx, model_assignments in enumerate(all_model_assignments):
-        weight = model_weights[idx]
-        
-        for assignment in model_assignments:
-            loc = assignment['location']
-            auto_id = assignment['auto_id']
-            students = assignment['students']
-            dist = assignment['distance']
-            
-            key = (loc, auto_id)
-            
-            if key not in ensemble_scores:
-                ensemble_scores[key] = {
-                    'students': 0,
-                    'total_distance': 0,
-                    'weighted_score': 0,
-                    'count': 0,
-                    'assignment': assignment
-                }
-            
-            # Calculate score: efficiency = students/distance
-            efficiency = students / (dist + 1)
-            score = efficiency * weight * 100
-            
-            ensemble_scores[key]['students'] += students * weight
-            ensemble_scores[key]['total_distance'] += dist * weight
-            ensemble_scores[key]['weighted_score'] += score
-            ensemble_scores[key]['count'] += 1
-    
-    # Convert ensemble scores to assignments, sorted by weighted score
+    # Select best assignments based on weighted distance
     final_assignments = []
-    remaining_students_ensemble = remaining_students.copy()
-    temp_autos_ensemble = []
-    for auto in autos:
-        temp_autos_ensemble.append({
-            'id': auto['id'],
-            'x': auto['x'],
-            'y': auto['y'],
-            'capacity': auto['capacity'],
-            'passengers': 0
-        })
+    used_drones = set()
+    used_dests = set()
     
-    # Sort by weighted score (higher is better)
-    sorted_scores = sorted(ensemble_scores.items(), key=lambda x: x[1]['weighted_score'], reverse=True)
+    # Sort all assignments by weighted score
+    all_assignments = []
+    for result, weight in all_results:
+        for assignment in result:
+            if assignment['drone_id'] not in used_drones and assignment['destination'] not in used_dests:
+                score = assignment['distance'] * weight
+                all_assignments.append((score, assignment))
     
-    for (loc, auto_id), score_data in sorted_scores:
-        if remaining_students_ensemble.get(loc, 0) <= 0:
-            continue
-        
-        # Find the auto
-        target_auto = None
-        for auto in temp_autos_ensemble:
-            if auto['id'] == auto_id:
-                target_auto = auto
-                break
-        
-        if target_auto and target_auto['passengers'] < target_auto['capacity']:
-            remaining_capacity = target_auto['capacity'] - target_auto['passengers']
-            students_to_pick = min(remaining_capacity, remaining_students_ensemble[loc])
-            
-            if students_to_pick > 0:
-                # Use average distance from ensemble
-                avg_distance = score_data['total_distance'] / max(score_data['count'], 1)
-                
-                final_assignments.append({
-                    'auto_id': auto_id,
-                    'location': loc,
-                    'students': students_to_pick,
-                    'distance': avg_distance,
-                    'auto_x': target_auto['x'],
-                    'auto_y': target_auto['y'],
-                    'loc_x': LOCATIONS[loc]['x'],
-                    'loc_y': LOCATIONS[loc]['y']
-                })
-                
-                target_auto['passengers'] += students_to_pick
-                remaining_students_ensemble[loc] -= students_to_pick
+    all_assignments.sort(key=lambda x: x[0])
     
-    assignments = final_assignments
+    for score, assignment in all_assignments:
+        if assignment['drone_id'] not in used_drones and assignment['destination'] not in used_dests:
+            final_assignments.append(assignment)
+            used_drones.add(assignment['drone_id'])
+            used_dests.add(assignment['destination'])
     
-    # Update actual autos
-    for a in assignments:
-        for auto in autos:
-            if auto['id'] == a['auto_id']:
-                auto['passengers'] += a['students']
-                break
-    
-    return assignments
+    return final_assignments
 
-def calculate_model_metrics(assignments, locations, autos):
-    """Calculate metrics for model evaluation - shows differences between models"""
-    if not assignments:
-        return {
-            'accuracy': 0.0,
-            'rmse': 0.0,
-            'f1_score': 0.0,
-            'precision': 0.0,
-            'total_distance': 0.0,
-            'utilization': 0.0
-        }
-    
-    # Calculate total students picked
-    total_picked = sum(a['students'] for a in assignments)
-    total_students = sum(locations.values())
-    total_capacity = sum(auto['capacity'] for auto in autos)
-    
-    # Accuracy: % of students successfully assigned + efficiency bonus
-    base_accuracy = (total_picked / total_students * 100) if total_students > 0 else 0.0
-    
-    # Calculate efficiency metrics that differ between models
-    distances = [a['distance'] for a in assignments]
-    total_distance = sum(distances)
-    avg_distance = np.mean(distances) if distances else 0
-    
-    # Efficiency score: lower distance = higher efficiency (normalized)
-    max_possible_distance = 1000  # reasonable max
-    distance_efficiency = max(0, (max_possible_distance - avg_distance) / max_possible_distance * 100)
-    
-    # Accuracy with efficiency component (models differ here)
-    accuracy = base_accuracy * 0.7 + distance_efficiency * 0.3
-    
-    # Utilization: % of auto capacity used
-    utilization = (total_picked / total_capacity * 100) if total_capacity > 0 else 0.0
-    
-    # RMSE: Root Mean Square Error of assignment distance (shows variance)
-    mean_distance = np.mean(distances) if distances else 0
-    rmse = math.sqrt(np.mean([(d - mean_distance)**2 for d in distances])) if distances else 0.0
-    
-    # Precision: % of assignments that efficiently use auto capacity (>75% filled)
-    auto_usage = {}
-    for a in assignments:
-        if a['auto_id'] not in auto_usage:
-            auto_usage[a['auto_id']] = 0
-        auto_usage[a['auto_id']] += a['students']
-    
-    precision = 0.0
-    if auto_usage:
-        efficient_autos = sum(1 for auto_id, used in auto_usage.items() 
-                            if used >= 3)  # >75% capacity (3/4)
-        precision = (efficient_autos / len(auto_usage) * 100) if auto_usage else 0.0
-    
-    # F1 Score: Harmonic mean of accuracy and precision
-    if accuracy + precision > 0:
-        f1 = 2 * (accuracy * precision) / (accuracy + precision)
-    else:
-        f1 = 0.0
-    
-    return {
-        'accuracy': round(accuracy, 2),
-        'rmse': round(rmse, 2),
-        'f1_score': round(f1, 2),
-        'precision': round(precision, 2),
-        'total_distance': round(total_distance, 2),
-        'utilization': round(utilization, 2)
-    }
+# ==================== COMPUTER VISION ====================
 
-def create_prototype_map(autos, locations, assignments):
-    """Create visualization map with autos and locations"""
+@st.cache_resource
+def load_yolo_model():
+    """Load YOLOv8 model with caching"""
+    if not YOLO_AVAILABLE:
+        return None
+    try:
+        model = YOLO('yolov8n.pt')
+        st.session_state.yolo_model_ready = True
+        return model
+    except Exception as e:
+        st.session_state.yolo_model_ready = False
+        st.session_state.yolo_error = str(e)
+        return None
+
+def detect_objects_yolo(image, model=None):
+    """Run YOLOv8 object detection on image"""
+    if not YOLO_AVAILABLE:
+        return image, []
+    
+    try:
+        # Load model if not provided
+        if model is None:
+            model = load_yolo_model()
+            if model is None:
+                return image, []
+        
+        # Convert PIL to numpy if needed
+        if isinstance(image, Image.Image):
+            image = np.array(image)
+        
+        # Ensure image is in correct format
+        if len(image.shape) == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        elif image.shape[2] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
+        
+        # Run inference
+        results = model(image, verbose=False)
+        
+        # Extract detections
+        detections = []
+        annotated_image = image.copy()
+        
+        for result in results:
+            if result.boxes is not None:
+                boxes = result.boxes
+                for box in boxes:
+                    # Get box coordinates
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    confidence = float(box.conf[0].cpu().numpy())
+                    class_id = int(box.cls[0].cpu().numpy())
+                    class_name = model.names[class_id]
+                    
+                    # Filter for relevant classes: person, vehicle, building-related
+                    relevant_classes = ['person', 'car', 'truck', 'bus', 'motorcycle', 'bicycle', 
+                                      'traffic light', 'stop sign', 'fire hydrant', 'bench']
+                    
+                    if class_name in relevant_classes and confidence > 0.25:
+                        detections.append({
+                            'class': class_name,
+                            'confidence': confidence,
+                            'bbox': [int(x1), int(y1), int(x2), int(y2)]
+                        })
+                        
+                        # Draw bounding box
+                        cv2.rectangle(annotated_image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 3)
+                        label = f"{class_name} {confidence:.2f}"
+                        cv2.putText(annotated_image, label, (int(x1), int(y1) - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        return annotated_image, detections
+    
+    except Exception as e:
+        st.error(f"Detection error: {str(e)}")
+        return image, []
+
+# ==================== VISUALIZATION ====================
+
+def create_drone_map(drones, assignments, destinations, animation_progress=0):
+    """Create interactive map with drones and routes"""
     fig = go.Figure()
     
-    # Add location markers
-    for loc_name, loc_data in LOCATIONS.items():
-        if loc_name in locations and locations[loc_name] > 0:
-            count = locations[loc_name]
-            # Color based on frequency
-            if count >= 6:
-                color = 'red'
-            elif count >= 3:
-                color = 'yellow'
-            else:
-                color = 'green'
-            
+    # Add campus locations
+    for loc_name, loc_data in CAMPUS_LOCATIONS.items():
+        if loc_name in destinations:
+            # Highlight active destinations with pulsing effect
+            pulse_size = 50 + 10 * math.sin(animation_progress * 0.1) if animation_progress > 0 else 50
             fig.add_trace(go.Scatter(
                 x=[loc_data['x']],
                 y=[loc_data['y']],
                 mode='markers+text',
-                marker=dict(size=30, color=color, symbol='circle'),
-                text=[f"{loc_name}<br>{count} students"],
+                marker=dict(
+                    size=pulse_size,
+                    color='red', 
+                    symbol='circle', 
+                    line=dict(width=3, color='darkred'),
+                    opacity=0.8
+                ),
+                text=[loc_data['icon']],
+                textposition="middle center",
+                textfont=dict(size=20),
+                name=loc_name,
+                hovertemplate=f"<b>{loc_name}</b><br>Type: {loc_data['type']}<br>Status: Active Target<extra></extra>"
+            ))
+        else:
+            # Regular locations
+            fig.add_trace(go.Scatter(
+                x=[loc_data['x']],
+                y=[loc_data['y']],
+                mode='markers+text',
+                marker=dict(size=30, color='gray', symbol='circle', opacity=0.4),
+                text=[loc_data['icon']],
                 textposition="middle center",
                 name=loc_name,
-                hovertemplate=f"<b>{loc_name}</b><br>Students: {count}"
+                showlegend=False,
+                hovertemplate=f"<b>{loc_name}</b><extra></extra>"
             ))
     
-    # Add auto markers
-    for auto in autos:
-        fig.add_trace(go.Scatter(
-            x=[auto['x']],
-            y=[auto['y']],
-            mode='markers+text',
-            marker=dict(size=25, color='blue', symbol='square'),
-            text=[f"Auto {auto['id']}<br>{auto['passengers']}/4"],
-            textposition="middle center",
-            name=f"Auto {auto['id']}",
-            hovertemplate=f"<b>Auto {auto['id']}</b><br>Passengers: {auto['passengers']}/4"
-        ))
-    
-    # Add assignment lines
+    # Add drone routes with smooth animation
     for assignment in assignments:
+        drone = next((d for d in drones if d['id'] == assignment['drone_id']), None)
+        if not drone:
+            continue
+        
+        # Calculate intermediate points for smooth animation
+        start_x, start_y = assignment['drone_x'], assignment['drone_y']
+        end_x, end_y = assignment['dest_x'], assignment['dest_y']
+        
+        # Create smooth path with multiple waypoints
+        num_waypoints = 30
+        waypoints_x = []
+        waypoints_y = []
+        
+        for i in range(num_waypoints + 1):
+            t = i / num_waypoints
+            # Smooth easing function for natural movement
+            eased_t = t * t * (3 - 2 * t)  # Smoothstep function
+            waypoints_x.append(start_x + (end_x - start_x) * eased_t)
+            waypoints_y.append(start_y + (end_y - start_y) * eased_t)
+        
+        # Current position based on animation progress
+        if animation_progress > 0:
+            progress = min(animation_progress / 100, 1.0)
+            # Use smoothstep for natural easing
+            eased_progress = progress * progress * (3 - 2 * progress)
+            waypoint_idx = int(eased_progress * num_waypoints)
+            waypoint_idx = min(waypoint_idx, num_waypoints)
+            current_x = waypoints_x[waypoint_idx]
+            current_y = waypoints_y[waypoint_idx]
+        else:
+            current_x, current_y = start_x, start_y
+        
+        # Route line with gradient effect
         fig.add_trace(go.Scatter(
-            x=[assignment['auto_x'], assignment['loc_x']],
-            y=[assignment['auto_y'], assignment['loc_y']],
+            x=waypoints_x,
+            y=waypoints_y,
             mode='lines',
-            line=dict(color='gray', width=2, dash='dash'),
+            line=dict(color='rgba(0, 100, 255, 0.6)', width=3),
             showlegend=False,
-            hoverinfo='skip'
+            hoverinfo='skip',
+            name=f"Route {drone['id']}"
         ))
-    
-    fig.update_layout(
-        title="Campus Auto Assignment Map",
-        xaxis=dict(range=[0, 700], showgrid=True),
-        yaxis=dict(range=[0, 600], showgrid=True),
-        width=900,
-        height=600,
-        showlegend=True
-    )
-    
-    return fig
-
-def create_heatmap(locations):
-    """Create heat map showing student frequency with color intensity"""
-    loc_names = []
-    x_coords = []
-    y_coords = []
-    frequencies = []
-    colors = []
-    
-    for loc_name, freq in locations.items():
-        if loc_name in LOCATIONS:
-            loc_names.append(loc_name)
-            x_coords.append(LOCATIONS[loc_name]['x'])
-            y_coords.append(LOCATIONS[loc_name]['y'])
-            frequencies.append(freq)
-            # Color based on frequency: red (high), yellow (medium), green (low)
-            if freq >= 6:
-                colors.append('red')
-            elif freq >= 3:
-                colors.append('yellow')
-            else:
-                colors.append('green')
-    
-    fig = go.Figure()
-    
-    # Add scatter points with color intensity
-    for i, loc_name in enumerate(loc_names):
+        
+        # Drone at current position
         fig.add_trace(go.Scatter(
-            x=[x_coords[i]],
-            y=[y_coords[i]],
+            x=[current_x],
+            y=[current_y],
             mode='markers+text',
             marker=dict(
-                size=frequencies[i] * 8 + 20,  # Size proportional to frequency
-                color=colors[i],
-                opacity=0.7,
-                line=dict(width=2, color='black')
+                size=35, 
+                color='blue', 
+                symbol='triangle-up',
+                line=dict(width=2, color='darkblue'),
+                opacity=0.9
             ),
-            text=[f"{loc_name}<br>{frequencies[i]}"],
+            text=['🚁'],
             textposition="middle center",
-            name=loc_name,
-            hovertemplate=f"<b>{loc_name}</b><br>Students: {frequencies[i]}<extra></extra>"
+            textfont=dict(size=18),
+            name=f"Drone {drone['id']}",
+            hovertemplate=f"<b>Drone {drone['id']}</b><br>Status: {drone['status']}<br>Battery: {drone['battery']}%<br>Target: {assignment['destination']}<br>Distance: {assignment['distance']:.1f}m<extra></extra>"
         ))
+        
+        # Add progress indicator
+        if animation_progress > 0 and animation_progress < 100:
+            fig.add_trace(go.Scatter(
+                x=[current_x],
+                y=[current_y - 15],
+                mode='markers',
+                marker=dict(size=8, color='green', symbol='circle'),
+                showlegend=False,
+                hoverinfo='skip'
+            ))
+    
+    # Add idle drones
+    for drone in drones:
+        if drone['status'] == 'idle' and not any(a['drone_id'] == drone['id'] for a in assignments):
+            fig.add_trace(go.Scatter(
+                x=[drone['x']],
+                y=[drone['y']],
+                mode='markers+text',
+                marker=dict(
+                    size=28, 
+                    color='lightblue', 
+                    symbol='triangle-up',
+                    line=dict(width=1, color='blue'),
+                    opacity=0.7
+                ),
+                text=['🚁'],
+                textposition="middle center",
+                textfont=dict(size=16),
+                name=f"Drone {drone['id']} (Idle)",
+                hovertemplate=f"<b>Drone {drone['id']}</b><br>Status: Idle<br>Battery: {drone['battery']}%<extra></extra>"
+            ))
     
     fig.update_layout(
-        title="Student Frequency Heat Map (Red=High, Yellow=Medium, Green=Low)",
-        xaxis=dict(range=[0, 700], showgrid=True, title="X Coordinate"),
-        yaxis=dict(range=[0, 600], showgrid=True, title="Y Coordinate"),
-        width=900,
-        height=600,
-        showlegend=False
+        title=dict(
+            text="🚁 AI-Powered Drone Fleet - Real-Time Route Optimization",
+            font=dict(size=20, color='#333')
+        ),
+        xaxis=dict(range=[0, 700], showgrid=True, gridcolor='lightgray', title="X Coordinate (m)"),
+        yaxis=dict(range=[0, 600], showgrid=True, gridcolor='lightgray', title="Y Coordinate (m)"),
+        width=1000,
+        height=700,
+        showlegend=True,
+        hovermode='closest',
+        template='plotly_white',
+        plot_bgcolor='rgba(240, 240, 240, 0.5)'
     )
     
     return fig
 
-# Main Page
-st.title("🚗 Thapar Campus Auto Optimization System")
-st.markdown("---")
+def calculate_metrics(drones, assignments, destinations):
+    """Calculate live metrics"""
+    total_distance = sum(a['distance'] for a in assignments)
+    
+    active_drones = len([d for d in drones if d['status'] != 'idle'])
+    total_drones = len(drones)
+    utilization = (active_drones / total_drones * 100) if total_drones > 0 else 0
+    
+    total_tasks = len(destinations)
+    completed_tasks = len(assignments)
+    coverage = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+    
+    # Model accuracy (simulated based on efficiency)
+    avg_distance = total_distance / len(assignments) if assignments else 0
+    max_possible_distance = 1000
+    accuracy = max(0, (max_possible_distance - avg_distance) / max_possible_distance * 100)
+    
+    return {
+        'total_distance': round(total_distance, 2),
+        'utilization': round(utilization, 1),
+        'coverage': round(coverage, 1),
+        'accuracy': round(accuracy, 1),
+        'active_drones': active_drones,
+        'total_drones': total_drones
+    }
 
-# Sidebar for model selection
-st.sidebar.title("AI Model Selection")
-selected_model = st.sidebar.selectbox(
-    "Choose AI Model",
-    ["KNN (Nearest Neighbors)", "Random Forest", "Linear Regression", "Gradient Boosting", 
-     "Dijkstra's Algorithm", "Genetic Algorithm", "Particle Swarm Optimization", "Simulated Annealing",
-     "Ensemble Model (Top 5)"]
+# ==================== MAIN APP ====================
+
+st.markdown("""
+<div class="main-header">
+    <h1>🚁 AI-Powered Autonomous Drone Fleet System</h1>
+    <p style="font-size: 1.2rem; margin-top: 10px;">Intelligent Route Optimization • Computer Vision • Real-Time Analytics</p>
+</div>
+""", unsafe_allow_html=True)
+
+# Sidebar
+st.sidebar.title("⚙️ Control Panel")
+
+# Mode selection
+mode = st.sidebar.selectbox(
+    "🎯 Operation Mode",
+    ["Delivery Optimization", "Surveillance Mode"],
+    help="Select the operational mode for the drone fleet"
 )
 
-# Calculate metrics for all models to show in comparison table
+# Algorithm selection
+algorithm = st.sidebar.selectbox(
+    "🤖 Optimization Algorithm",
+    [
+        "KNN (Nearest Neighbors)",
+        "Dijkstra's Algorithm",
+        "Genetic Algorithm",
+        "Particle Swarm Optimization",
+        "Ensemble Model"
+    ],
+    help="Choose the AI algorithm for route optimization"
+)
+
+# Drone Management
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 📊 Model Performance Metrics")
+st.sidebar.subheader("🚁 Drone Fleet Management")
 
-# Get active locations for metrics calculation
-active_locations_metrics = {k: v for k, v in st.session_state.student_frequency.items() if v > 0}
+st.sidebar.write(f"**Total Drones:** {len(st.session_state.drones)}")
 
-# Calculate metrics for each model
-all_models_metrics = {}
-model_names = ["KNN (Nearest Neighbors)", "Random Forest", "Linear Regression", "Gradient Boosting",
-               "Dijkstra's Algorithm", "Genetic Algorithm", "Particle Swarm Optimization", "Simulated Annealing",
-               "Ensemble Model (Top 5)"]
+if st.sidebar.button("➕ Add New Drone", use_container_width=True):
+    new_id = max([d['id'] for d in st.session_state.drones], default=0) + 1
+    # Place new drone at random safe position
+    new_x = random.randint(50, 650)
+    new_y = random.randint(50, 550)
+    st.session_state.drones.append({
+        'id': new_id,
+        'x': new_x,
+        'y': new_y,
+        'status': 'idle',
+        'battery': random.randint(80, 100),
+        'payload': 0,
+        'target': None,
+        'route': [],
+        'current_step': 0
+    })
+    st.rerun()
 
-for model_name in model_names:
-    # Create fresh copy of autos for each model
-    autos_for_model = []
-    for auto in st.session_state.auto_positions:
-        autos_for_model.append({
-            'id': auto['id'],
-            'x': auto['x'],
-            'y': auto['y'],
-            'capacity': auto['capacity'],
-            'passengers': 0
-        })
+# Drone position editor
+with st.sidebar.expander("📍 Edit Drone Positions", expanded=False):
+    for i, drone in enumerate(st.session_state.drones):
+        st.write(f"**Drone {drone['id']}**")
+        col_x, col_y = st.columns(2)
+        with col_x:
+            new_x = st.number_input("X", value=drone['x'], min_value=0, max_value=700, key=f"x_{drone['id']}")
+        with col_y:
+            new_y = st.number_input("Y", value=drone['y'], min_value=0, max_value=600, key=f"y_{drone['id']}")
+        
+        if st.button(f"Update Drone {drone['id']}", key=f"update_{drone['id']}"):
+            st.session_state.drones[i]['x'] = int(new_x)
+            st.session_state.drones[i]['y'] = int(new_y)
+            st.rerun()
+        
+        if st.button(f"Remove Drone {drone['id']}", key=f"remove_{drone['id']}"):
+            st.session_state.drones.pop(i)
+            st.rerun()
+        
+        st.markdown("---")
+
+# Simulation controls
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎮 Simulation Controls")
+
+simulation_speed = st.sidebar.slider("⚡ Animation Speed", 1, 10, 5, help="Control the speed of drone movement animation")
+
+col_start, col_pause = st.sidebar.columns(2)
+with col_start:
+    if st.button("▶️ Start", use_container_width=True):
+        st.session_state.simulation_running = True
+        st.session_state.animation_frame = 0
+        st.rerun()
+
+with col_pause:
+    if st.button("⏸️ Pause", use_container_width=True):
+        st.session_state.simulation_running = False
+        st.rerun()
+
+if st.sidebar.button("🔄 Reset", use_container_width=True):
+    st.session_state.simulation_running = False
+    st.session_state.animation_frame = 0
+    for drone in st.session_state.drones:
+        drone['status'] = 'idle'
+        drone['target'] = None
+        drone['route'] = []
+        drone['current_step'] = 0
+    st.rerun()
+
+# Task management
+st.sidebar.markdown("---")
+st.sidebar.subheader("📋 Task Management")
+
+if st.sidebar.button("➕ Add Random Task", use_container_width=True):
+    locations = list(CAMPUS_LOCATIONS.keys())
+    new_location = random.choice(locations)
+    task_types = ['delivery', 'surveillance']
+    priorities = ['high', 'medium', 'low']
     
-    # Run assignment for each model
-    if model_name == "KNN (Nearest Neighbors)":
-        model_assignments = knn_auto_assignment(autos_for_model, active_locations_metrics)
-    elif model_name == "Random Forest":
-        model_assignments = random_forest_assignment(autos_for_model, active_locations_metrics)
-    elif model_name == "Linear Regression":
-        model_assignments = linear_regression_assignment(autos_for_model, active_locations_metrics)
-    elif model_name == "Gradient Boosting":
-        model_assignments = gradient_boosting_assignment(autos_for_model, active_locations_metrics)
-    elif model_name == "Dijkstra's Algorithm":
-        model_assignments = dijkstra_assignment(autos_for_model, active_locations_metrics)
-    elif model_name == "Genetic Algorithm":
-        model_assignments = genetic_algorithm_assignment(autos_for_model, active_locations_metrics)
-    elif model_name == "Particle Swarm Optimization":
-        model_assignments = particle_swarm_assignment(autos_for_model, active_locations_metrics)
-    elif model_name == "Simulated Annealing":
-        model_assignments = simulated_annealing_assignment(autos_for_model, active_locations_metrics)
-    elif model_name == "Ensemble Model (Top 5)":
-        model_assignments = ensemble_model_assignment(autos_for_model, active_locations_metrics)
-    else:
-        model_assignments = knn_auto_assignment(autos_for_model, active_locations_metrics)
-    
-    # Calculate metrics
-    all_models_metrics[model_name] = calculate_model_metrics(
-        model_assignments, active_locations_metrics, autos_for_model
-    )
-
-# Display metrics table
-metrics_df = pd.DataFrame({
-    'Model': model_names,
-    'Accuracy (%)': [all_models_metrics[m]['accuracy'] for m in model_names],
-    'RMSE': [all_models_metrics[m]['rmse'] for m in model_names],
-    'F1 Score': [all_models_metrics[m]['f1_score'] for m in model_names],
-    'Precision (%)': [all_models_metrics[m]['precision'] for m in model_names],
-    'Total Distance': [all_models_metrics[m]['total_distance'] for m in model_names],
-    'Utilization (%)': [all_models_metrics[m]['utilization'] for m in model_names]
-})
-
-st.sidebar.dataframe(
-    metrics_df.style.format({
-        'Accuracy (%)': '{:.1f}',
-        'RMSE': '{:.2f}',
-        'F1 Score': '{:.1f}',
-        'Precision (%)': '{:.1f}',
-        'Total Distance': '{:.1f}',
-        'Utilization (%)': '{:.1f}'
-    }),
-    use_container_width=True,
-    hide_index=True
-)
+    new_task = {
+        'id': len(st.session_state.tasks) + 1,
+        'location': new_location,
+        'priority': random.choice(priorities),
+        'type': random.choice(task_types),
+        'status': 'pending'
+    }
+    st.session_state.tasks.append(new_task)
+    st.rerun()
 
 # Main content area
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    st.subheader("📍 Campus Map - Auto Assignment Prototype")
+    st.subheader("🗺️ Real-Time Drone Fleet Map")
     
-    # Display locations with student counts
-    st.markdown("### Current Student Distribution")
-    active_locations = {k: v for k, v in st.session_state.student_frequency.items() if v > 0}
+    # Get active destinations based on mode
+    active_destinations = {}
+    for task in st.session_state.tasks:
+        if task['status'] == 'pending':
+            if mode == "Delivery Optimization" and task['type'] == 'delivery':
+                active_destinations[task['location']] = task
+            elif mode == "Surveillance Mode" and task['type'] == 'surveillance':
+                active_destinations[task['location']] = task
     
-    # Create a copy of auto positions for assignment
-    autos_copy = []
-    for auto in st.session_state.auto_positions:
-        autos_copy.append({
-            'id': auto['id'],
-            'x': auto['x'],
-            'y': auto['y'],
-            'capacity': auto['capacity'],
-            'passengers': 0
-        })
+    # Run optimization algorithm
+    drones_copy = [d.copy() for d in st.session_state.drones]
+    assignments = []
     
-    # Perform auto assignment based on selected model
-    # ALL models use the SAME active_locations data from Feed Data
-    # Each model uses a DIFFERENT assignment algorithm
-    if selected_model == "KNN (Nearest Neighbors)":
-        assignments = knn_auto_assignment(autos_copy, active_locations)
-    elif selected_model == "Random Forest":
-        # Random Forest: Distance-weighted assignment prioritizing high-demand areas
-        assignments = random_forest_assignment(autos_copy, active_locations)
-    elif selected_model == "Linear Regression":
-        # Linear Regression: Minimizes total distance traveled
-        assignments = linear_regression_assignment(autos_copy, active_locations)
-    elif selected_model == "Gradient Boosting":
-        # Gradient Boosting: Maximizes efficiency (students/distance ratio)
-        assignments = gradient_boosting_assignment(autos_copy, active_locations)
-    elif selected_model == "Dijkstra's Algorithm":
-        # Dijkstra's: Shortest path optimization with priority queue
-        assignments = dijkstra_assignment(autos_copy, active_locations)
-    elif selected_model == "Genetic Algorithm":
-        # Genetic Algorithm: Evolutionary optimization with selection and mutation
-        assignments = genetic_algorithm_assignment(autos_copy, active_locations)
-    elif selected_model == "Particle Swarm Optimization":
-        # PSO: Swarm intelligence with velocity and position updates
-        assignments = particle_swarm_assignment(autos_copy, active_locations)
-    elif selected_model == "Simulated Annealing":
-        # Simulated Annealing: Probabilistic optimization with cooling schedule
-        assignments = simulated_annealing_assignment(autos_copy, active_locations)
-    elif selected_model == "Ensemble Model (Top 5)":
-        # Ensemble Model: Combines top 5 models using weighted voting
-        assignments = ensemble_model_assignment(autos_copy, active_locations)
-    else:
-        # Default: use KNN assignment
-        assignments = knn_auto_assignment(autos_copy, active_locations)
+    if algorithm == "KNN (Nearest Neighbors)":
+        assignments = knn_route_optimization(drones_copy, active_destinations)
+    elif algorithm == "Dijkstra's Algorithm":
+        assignments = dijkstra_route_optimization(drones_copy, active_destinations)
+    elif algorithm == "Genetic Algorithm":
+        assignments = genetic_algorithm_optimization(drones_copy, active_destinations)
+    elif algorithm == "Particle Swarm Optimization":
+        assignments = particle_swarm_optimization(drones_copy, active_destinations)
+    elif algorithm == "Ensemble Model":
+        assignments = ensemble_optimization(drones_copy, active_destinations)
     
-    # Calculate metrics for the selected model
-    model_metrics = calculate_model_metrics(assignments, active_locations, autos_copy)
+    # Animation progress - smooth update without constant reruns
+    animation_progress = st.session_state.animation_frame if st.session_state.simulation_running else 0
     
-    # Create and display map (use autos_copy to show updated passenger counts)
-    map_fig = create_prototype_map(
-        autos_copy,
-        active_locations,
-        assignments
-    )
-    st.plotly_chart(map_fig, use_container_width=True)
+    # Create and display map
+    map_placeholder = st.empty()
+    map_fig = create_drone_map(st.session_state.drones, assignments, active_destinations, animation_progress)
+    map_placeholder.plotly_chart(map_fig, use_container_width=True)
+    
+    # Update animation frame smoothly - only update when running
+    if st.session_state.simulation_running:
+        current_time = time.time()
+        # Update every 0.15 seconds to avoid flickering (smoother)
+        time_delta = current_time - st.session_state.last_update_time
+        if time_delta >= 0.15:
+            speed_factor = simulation_speed / 5.0
+            frame_increment = max(1, int(3 * speed_factor))
+            new_frame = (st.session_state.animation_frame + frame_increment) % 100
+            
+            # Only rerun if frame actually changed significantly
+            if abs(new_frame - st.session_state.animation_frame) >= 2:
+                st.session_state.animation_frame = new_frame
+                st.session_state.last_update_time = current_time
+                
+                # Auto-trigger detection when drone reaches destination
+                if st.session_state.animation_frame >= 95:
+                    for assignment in assignments:
+                        task = active_destinations.get(assignment['destination'])
+                        if task and task['status'] == 'pending':
+                            task['status'] = 'scanning'
+                
+                # Rerun to update display
+                st.rerun()
 
 with col2:
-    st.subheader("📊 Summary")
-    st.markdown("### Auto Assignments")
+    st.subheader("📊 Live Metrics")
     
-    if assignments:
-        for assignment in assignments:
-            st.info(f"**Auto {assignment['auto_id']}** → {assignment['location']}\n"
-                   f"Students: {assignment['students']}\n"
-                   f"Distance: {assignment['distance']:.1f} units")
-    else:
-        st.warning("No assignments made")
+    # Calculate metrics
+    metrics = calculate_metrics(st.session_state.drones, assignments, active_destinations)
     
-    # Total statistics
-    total_students = sum(active_locations.values())
-    total_capacity = sum(auto['capacity'] for auto in st.session_state.auto_positions)
-    st.metric("Total Students", total_students)
-    st.metric("Total Auto Capacity", total_capacity)
-
-# Eye-catching Summary Section for Hackathon Pitch
-st.markdown("---")
-
-# Calculate statistics
-total_students = sum(active_locations.values())
-total_picked = sum(assignment['students'] for assignment in assignments)
-total_remaining = total_students - total_picked
-total_capacity = sum(auto['capacity'] for auto in st.session_state.auto_positions)
-utilization_rate = (total_picked / total_capacity * 100) if total_capacity > 0 else 0
-coverage_rate = (total_picked / total_students * 100) if total_students > 0 else 0
-
-# Problem Statement Section
-st.markdown("## 🎯 Problem Statement")
-st.markdown("""
-<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-            padding: 25px; border-radius: 15px; color: white; margin-bottom: 20px; box-shadow: 0 8px 16px rgba(0,0,0,0.2);">
-    <h3 style="color: white; margin-top: 0;">The Challenge at Thapar Campus</h3>
-    <p style="font-size: 16px; line-height: 1.8;">
-        <strong>🚫 Problem 1:</strong> Students wait endlessly at hostels because autos are not available at the right time<br>
-        <strong>🚫 Problem 2:</strong> Autos wait with empty/fewer seats, causing delays and inefficiency<br>
-        <strong>🚫 Problem 3:</strong> No predictive system to optimize auto routing based on student demand patterns
-    </p>
-</div>
-""", unsafe_allow_html=True)
-
-# Solution Section
-st.markdown("## 💡 Our AI-Powered Solution")
-st.markdown("""
-<div style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); 
-            padding: 25px; border-radius: 15px; color: white; margin-bottom: 20px; box-shadow: 0 8px 16px rgba(0,0,0,0.2);">
-    <h3 style="color: white; margin-top: 0;">Smart Auto Optimization System</h3>
-    <p style="font-size: 16px; line-height: 1.8;">
-        <strong>✅ KNN Algorithm:</strong> Finds nearest autos to student locations for optimal routing<br>
-        <strong>✅ Real-time Assignment:</strong> Dynamically assigns autos based on current student distribution<br>
-        <strong>✅ Route Optimization:</strong> Minimizes distance and waiting time for maximum efficiency<br>
-        <strong>✅ Predictive Analytics:</strong> Uses ML models to forecast student demand patterns
-    </p>
-</div>
-""", unsafe_allow_html=True)
-
-# Key Metrics Cards
-st.markdown("## 📊 Performance Metrics")
-col_met1, col_met2, col_met3, col_met4 = st.columns(4)
-
-with col_met1:
+    # Display metrics cards
     st.markdown(f"""
-    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                padding: 25px; border-radius: 15px; text-align: center; color: white; box-shadow: 0 6px 12px rgba(0,0,0,0.15);">
-        <h2 style="margin: 0; font-size: 42px; font-weight: bold;">{total_students}</h2>
-        <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.95;">👥 Total Students</p>
+    <div class="metric-card">
+        <h2 style="margin: 0; font-size: 36px;">{metrics['total_distance']:.1f}m</h2>
+        <p style="margin: 10px 0 0 0; font-size: 14px;">Total Distance</p>
     </div>
     """, unsafe_allow_html=True)
-
-with col_met2:
-    st.markdown(f"""
-    <div style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); 
-                padding: 25px; border-radius: 15px; text-align: center; color: white; box-shadow: 0 6px 12px rgba(0,0,0,0.15);">
-        <h2 style="margin: 0; font-size: 42px; font-weight: bold;">{total_picked}</h2>
-        <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.95;">✅ Students Assigned</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-with col_met3:
-    color1, color2 = ("#28a745", "#20c997") if coverage_rate >= 90 else ("#ffc107", "#ff9800")
-    st.markdown(f"""
-    <div style="background: linear-gradient(135deg, {color1} 0%, {color2} 100%); 
-                padding: 25px; border-radius: 15px; text-align: center; color: white; box-shadow: 0 6px 12px rgba(0,0,0,0.15);">
-        <h2 style="margin: 0; font-size: 42px; font-weight: bold;">{coverage_rate:.0f}%</h2>
-        <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.95;">📈 Coverage Rate</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-with col_met4:
-    st.markdown(f"""
-    <div style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); 
-                padding: 25px; border-radius: 15px; text-align: center; color: white; box-shadow: 0 6px 12px rgba(0,0,0,0.15);">
-        <h2 style="margin: 0; font-size: 42px; font-weight: bold;">{utilization_rate:.0f}%</h2>
-        <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.95;">🚗 Auto Utilization</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-# Model & Technology Stack
-st.markdown("---")
-col_tech1, col_tech2 = st.columns(2)
-
-with col_tech1:
-    st.markdown("### 🤖 AI Models & Technology")
-    st.markdown(f"""
-    <div style="background-color: #ffffff; padding: 20px; border-radius: 12px; border-left: 5px solid #007bff; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-        <p style="margin: 8px 0; font-size: 16px; color: #212529;"><strong>🎯 Current Model:</strong> <span style="color: #007bff; font-weight: bold;">{selected_model}</span></p>
-        <p style="margin: 8px 0; font-size: 16px; color: #212529;"><strong>📍 Active Locations:</strong> <span style="color: #28a745; font-weight: bold;">{len(active_locations)}</span> buildings</p>
-        <p style="margin: 8px 0; font-size: 16px; color: #212529;"><strong>🚗 Total Autos:</strong> <span style="color: #dc3545; font-weight: bold;">{len(st.session_state.auto_positions)}</span> vehicles</p>
-        <p style="margin: 8px 0; font-size: 16px; color: #212529;"><strong>💺 Total Capacity:</strong> <span style="color: #6f42c1; font-weight: bold;">{total_capacity}</span> seats</p>
-        <p style="margin: 8px 0; font-size: 16px; color: #212529;"><strong>⚡ Tech Stack:</strong> <span style="color: #495057;">Python, Streamlit, Scikit-learn, Plotly, KNN, Random Forest</span></p>
-    </div>
-    """, unsafe_allow_html=True)
-
-with col_tech2:
-    st.markdown("### 📋 Assignment Summary")
-    auto_assignments_grouped = {}
-    for assignment in assignments:
-        auto_id = assignment['auto_id']
-        if auto_id not in auto_assignments_grouped:
-            auto_assignments_grouped[auto_id] = []
-        auto_assignments_grouped[auto_id].append(assignment)
-    
-    summary_text = ""
-    for auto_id in sorted(auto_assignments_grouped.keys()):
-        auto_ass = auto_assignments_grouped[auto_id]
-        total_auto = sum(a['students'] for a in auto_ass)
-        locs = [a['location'] for a in auto_ass]
-        summary_text += f"<p style='margin: 10px 0; font-size: 16px; color: #212529;'><strong>🚗 Auto {auto_id}:</strong> <span style='color: #dc3545; font-weight: bold;'>{total_auto}/4</span> seats filled → <span style='color: #28a745;'>{', '.join(locs[:2])}{'...' if len(locs) > 2 else ''}</span></p>"
-    
-    if not summary_text:
-        summary_text = "<p style='color: #6c757d; font-size: 16px;'>No assignments made yet</p>"
     
     st.markdown(f"""
-    <div style="background-color: #ffffff; padding: 20px; border-radius: 12px; border-left: 5px solid #28a745; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-        {summary_text}
+    <div class="metric-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
+        <h2 style="margin: 0; font-size: 36px;">{metrics['utilization']:.1f}%</h2>
+        <p style="margin: 10px 0 0 0; font-size: 14px;">Fleet Utilization</p>
     </div>
     """, unsafe_allow_html=True)
-
-# Feed Data Button
-st.markdown("---")
-col_feed = st.columns([1, 2, 1])
-with col_feed[1]:
-    if st.button("📥 Feed Data / Update Student Frequencies", use_container_width=True, type="primary"):
-        st.session_state.show_data_page = True
-        st.rerun()
-
-# Data Feeding Page
-if st.session_state.get('show_data_page', False):
+    
+    st.markdown(f"""
+    <div class="metric-card" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">
+        <h2 style="margin: 0; font-size: 36px;">{metrics['coverage']:.1f}%</h2>
+        <p style="margin: 10px 0 0 0; font-size: 14px;">Coverage Rate</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown(f"""
+    <div class="metric-card" style="background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);">
+        <h2 style="margin: 0; font-size: 36px;">{metrics['accuracy']:.1f}%</h2>
+        <p style="margin: 10px 0 0 0; font-size: 14px;">Model Accuracy</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
     st.markdown("---")
-    st.subheader("📝 Feed Data - Student Frequencies & Auto Management")
+    st.subheader("🚁 Drone Status")
     
-    tab1, tab2 = st.tabs(["📍 Student Frequencies", "🚗 Auto Management"])
-    
-    with tab1:
-        with st.form("data_feed_form"):
-            st.markdown("### Update Student Frequency at Locations")
-            
-            col5, col6 = st.columns(2)
-            
-            with col5:
-                st.session_state.student_frequency['COS'] = st.number_input("COS", min_value=0, value=st.session_state.student_frequency['COS'])
-                st.session_state.student_frequency['Hostel A'] = st.number_input("Hostel A", min_value=0, value=st.session_state.student_frequency['Hostel A'])
-                st.session_state.student_frequency['Library'] = st.number_input("Library", min_value=0, value=st.session_state.student_frequency['Library'])
-                st.session_state.student_frequency['Jaggi'] = st.number_input("Jaggi", min_value=0, value=st.session_state.student_frequency['Jaggi'])
-            
-            with col6:
-                st.session_state.student_frequency['PG'] = st.number_input("PG", min_value=0, value=st.session_state.student_frequency['PG'])
-                st.session_state.student_frequency['O Block'] = st.number_input("O Block", min_value=0, value=st.session_state.student_frequency['O Block'])
-                st.session_state.student_frequency['B Block'] = st.number_input("B Block", min_value=0, value=st.session_state.student_frequency['B Block'])
-                st.session_state.student_frequency['Dispensary'] = st.number_input("Dispensary", min_value=0, value=st.session_state.student_frequency['Dispensary'])
-            
-            submitted = st.form_submit_button("💾 Save Student Data", use_container_width=True)
-            
-            if submitted:
-                st.success("✅ Student frequency data saved successfully!")
-                st.rerun()
-    
-    with tab2:
-        st.markdown("### Manage Autos")
-        st.markdown("Add, remove, or modify auto positions and capacities")
-        
-        # Quick Decrement/Increment Controls
-        col_dec, col_info = st.columns([1, 2])
-        with col_dec:
-            st.markdown("#### Quick Actions")
-            if st.button("➖ Decrement Auto (Remove Last)", use_container_width=True, type="secondary"):
-                if len(st.session_state.auto_positions) > 0:
-                    removed_auto = st.session_state.auto_positions.pop()
-                    st.success(f"✅ Auto {removed_auto['id']} removed successfully!")
-                    st.rerun()
-                else:
-                    st.warning("⚠️ No autos to remove!")
-        
-        with col_info:
-            st.info(f"📊 Current: **{len(st.session_state.auto_positions)}** autos | Total Capacity: **{sum(a['capacity'] for a in st.session_state.auto_positions)}** seats")
-        
-        # Check for existing collisions and fix them
-        active_locs = {k: v for k, v in st.session_state.student_frequency.items() if v > 0}
-        # Check all autos for collisions
-        for i, auto in enumerate(st.session_state.auto_positions):
-            collides = False
-            collision_dist = 80  # Minimum safe distance
-            
-            # Check collision with locations
-            for loc_name, loc_data in LOCATIONS.items():
-                if loc_name in active_locs:
-                    dist = calculate_distance(auto['x'], auto['y'], loc_data['x'], loc_data['y'])
-                    if dist < collision_dist:
-                        collides = True
-                        # Fix collision by moving to empty space
-                        new_x, new_y = find_empty_position(st.session_state.auto_positions, active_locs)
-                        st.session_state.auto_positions[i]['x'] = new_x
-                        st.session_state.auto_positions[i]['y'] = new_y
-                        st.warning(f"⚠️ Auto {auto['id']} was too close to {loc_name}. Moved to ({new_x}, {new_y})")
-                        break
-            
-            # Check collision with other autos
-            if not collides:
-                for j, other_auto in enumerate(st.session_state.auto_positions):
-                    if i != j:
-                        dist = calculate_distance(auto['x'], auto['y'], other_auto['x'], other_auto['y'])
-                        if dist < collision_dist:
-                            collides = True
-                            # Fix collision by moving to empty space
-                            new_x, new_y = find_empty_position(st.session_state.auto_positions, active_locs)
-                            st.session_state.auto_positions[i]['x'] = new_x
-                            st.session_state.auto_positions[i]['y'] = new_y
-                            st.warning(f"⚠️ Auto {auto['id']} was too close to Auto {other_auto['id']}. Moved to ({new_x}, {new_y})")
-                            break
-        
-        # Display current autos
-        st.markdown("#### Current Autos")
-        for i, auto in enumerate(st.session_state.auto_positions):
-            with st.expander(f"🚗 Auto {auto['id']} - Position ({auto['x']}, {auto['y']})"):
-                col_a1, col_a2, col_a3, col_a4 = st.columns(4)
-                with col_a1:
-                    new_x = st.number_input(f"X Position", value=auto['x'], min_value=0, max_value=700, key=f"x_{auto['id']}")
-                with col_a2:
-                    new_y = st.number_input(f"Y Position", value=auto['y'], min_value=0, max_value=600, key=f"y_{auto['id']}")
-                with col_a3:
-                    new_capacity = st.number_input(f"Capacity", value=auto['capacity'], min_value=1, max_value=10, key=f"cap_{auto['id']}")
-                with col_a4:
-                    if st.button("Update", key=f"update_{auto['id']}"):
-                        st.session_state.auto_positions[i]['x'] = int(new_x)
-                        st.session_state.auto_positions[i]['y'] = int(new_y)
-                        st.session_state.auto_positions[i]['capacity'] = int(new_capacity)
-                        st.success(f"✅ Auto {auto['id']} updated!")
-                        st.rerun()
-                    if st.button("Remove", key=f"remove_{auto['id']}"):
-                        st.session_state.auto_positions.pop(i)
-                        st.success(f"✅ Auto {auto['id']} removed!")
-                        st.rerun()
-        
-        # Add new auto - automatically finds empty position
-        st.markdown("#### Add New Auto")
-        # Find empty position automatically
-        empty_x, empty_y = find_empty_position(
-            st.session_state.auto_positions,
-            {k: v for k, v in st.session_state.student_frequency.items() if v > 0}
-        )
-        
-        with st.form("add_auto_form"):
-            st.info(f"💡 Auto will be placed at ({empty_x}, {empty_y}) - Empty space detected!")
-            col_add1, col_add2, col_add3 = st.columns(3)
-            with col_add1:
-                new_auto_x = st.number_input("X Position", min_value=0, max_value=700, value=empty_x)
-            with col_add2:
-                new_auto_y = st.number_input("Y Position", min_value=0, max_value=600, value=empty_y)
-            with col_add3:
-                new_auto_capacity = st.number_input("Capacity", min_value=1, max_value=10, value=4)
-            
-            # Validate position doesn't collide
-            collides = False
-            collision_with = None
-            test_x, test_y = int(new_auto_x), int(new_auto_y)
-            
-            # Check collision with locations
-            for loc_name, loc_data in LOCATIONS.items():
-                loc_x, loc_y = loc_data['x'], loc_data['y']
-                dist = calculate_distance(test_x, test_y, loc_x, loc_y)
-                if dist < 80:
-                    collides = True
-                    collision_with = loc_name
-                    break
-            
-            # Check collision with existing autos
-            if not collides:
-                for auto in st.session_state.auto_positions:
-                    dist = calculate_distance(test_x, test_y, auto['x'], auto['y'])
-                    if dist < 80:
-                        collides = True
-                        collision_with = f"Auto {auto['id']}"
-                        break
-            
-            if collides:
-                st.warning(f"⚠️ Position ({test_x}, {test_y}) is too close to {collision_with}. Using empty position instead.")
-                final_x, final_y = empty_x, empty_y
-            else:
-                final_x, final_y = test_x, test_y
-            
-            if st.form_submit_button("➕ Add New Auto"):
-                new_auto_id = max([a['id'] for a in st.session_state.auto_positions], default=0) + 1
-                st.session_state.auto_positions.append({
-                    'id': new_auto_id,
-                    'x': final_x,
-                    'y': final_y,
-                    'capacity': int(new_auto_capacity),
-                    'passengers': 0
-                })
-                st.success(f"✅ Auto {new_auto_id} added at position ({final_x}, {final_y})!")
-                st.rerun()
-    
-    # Model Performance Summary - Best Model Recommendation
-    # Use the same metrics calculated in sidebar for consistency
-    st.markdown("---")
-    st.markdown("## 🏆 Best Model Recommendation")
-    
-    # Use all_models_metrics from sidebar (already calculated above)
-    summary_models_metrics = all_models_metrics
-    all_model_names = model_names  # Use same model_names from sidebar
-    
-    total_students_summary = sum(active_locations_metrics.values())
-    total_autos_summary = len(st.session_state.auto_positions)
-    total_capacity_summary = sum(a['capacity'] for a in st.session_state.auto_positions)
-    
-    # Find best model based on composite score
-    # Score = (Accuracy * 0.3) + (100 - Normalized Distance * 0.3) + (Utilization * 0.2) + (Precision * 0.2)
-    best_model = None
-    best_score = -1
-    
-    for model_name, metrics in summary_models_metrics.items():
-        # Normalize distance (lower is better, so invert)
-        max_dist = max([m['total_distance'] for m in summary_models_metrics.values()]) if summary_models_metrics.values() else 1000
-        normalized_dist_score = (1 - (metrics['total_distance'] / max_dist)) * 100 if max_dist > 0 else 100
-        
-        # Composite score
-        composite_score = (
-            metrics['accuracy'] * 0.3 +
-            normalized_dist_score * 0.3 +
-            metrics['utilization'] * 0.2 +
-            metrics['precision'] * 0.2
-        )
-        
-        if composite_score > best_score:
-            best_score = composite_score
-            best_model = model_name
-    
-    if best_model:
-        best_metrics = summary_models_metrics[best_model]
-        
-        # Eye-catching summary card
+    for drone in st.session_state.drones:
+        status_icon = "🟢" if drone['status'] == 'idle' else "🔵" if drone['status'] == 'assigned' else "🟡"
         st.markdown(f"""
-        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                    padding: 30px; border-radius: 15px; color: white; box-shadow: 0 8px 16px rgba(0,0,0,0.3); margin-bottom: 20px;">
-            <h2 style="color: white; margin-top: 0; text-align: center;">🥇 Best Performing Model</h2>
-            <div style="background: rgba(255,255,255,0.2); padding: 20px; border-radius: 10px; margin: 15px 0;">
-                <h3 style="color: #FFD700; margin: 0; font-size: 28px; text-align: center;">{best_model}</h3>
-                <p style="text-align: center; font-size: 16px; margin: 10px 0; opacity: 0.9;">Recommended for current configuration</p>
-            </div>
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-top: 20px;">
-                <div style="background: rgba(255,255,255,0.15); padding: 15px; border-radius: 8px; text-align: center;">
-                    <p style="margin: 0; font-size: 14px; opacity: 0.9;">Accuracy</p>
-                    <p style="margin: 5px 0 0 0; font-size: 24px; font-weight: bold;">{best_metrics['accuracy']:.1f}%</p>
-                </div>
-                <div style="background: rgba(255,255,255,0.15); padding: 15px; border-radius: 8px; text-align: center;">
-                    <p style="margin: 0; font-size: 14px; opacity: 0.9;">Total Distance</p>
-                    <p style="margin: 5px 0 0 0; font-size: 24px; font-weight: bold;">{best_metrics['total_distance']:.1f}m</p>
-                </div>
-                <div style="background: rgba(255,255,255,0.15); padding: 15px; border-radius: 8px; text-align: center;">
-                    <p style="margin: 0; font-size: 14px; opacity: 0.9;">Utilization</p>
-                    <p style="margin: 5px 0 0 0; font-size: 24px; font-weight: bold;">{best_metrics['utilization']:.1f}%</p>
-                </div>
-            </div>
-            <div style="margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.1); border-radius: 8px;">
-                <p style="margin: 5px 0; font-size: 14px;"><strong>📊 Current Configuration:</strong></p>
-                <p style="margin: 5px 0; font-size: 14px;">👥 Students: <strong>{total_students_summary}</strong> | 🚗 Autos: <strong>{total_autos_summary}</strong> | 💺 Capacity: <strong>{total_capacity_summary}</strong></p>
-                <p style="margin: 10px 0 5px 0; font-size: 14px;"><strong>🎯 Why this model?</strong></p>
-                <p style="margin: 5px 0; font-size: 13px; opacity: 0.9;">
-                    This model achieved the best composite score combining accuracy ({best_metrics['accuracy']:.1f}%), 
-                    distance optimization ({best_metrics['total_distance']:.1f}m), utilization ({best_metrics['utilization']:.1f}%), 
-                    and precision ({best_metrics['precision']:.1f}%) for your current setup.
-                </p>
-            </div>
+        <div class="drone-card">
+            <strong>{status_icon} Drone {drone['id']}</strong><br>
+            Battery: {drone['battery']}% | Status: {drone['status']}<br>
+            Position: ({drone['x']}, {drone['y']})
         </div>
         """, unsafe_allow_html=True)
-        
-        # Quick comparison table
-        st.markdown("### 📈 All Models Performance Comparison")
-        comparison_df = pd.DataFrame({
-            'Model': all_model_names,
-            'Accuracy (%)': [summary_models_metrics[m]['accuracy'] for m in all_model_names],
-            'Distance': [summary_models_metrics[m]['total_distance'] for m in all_model_names],
-            'Utilization (%)': [summary_models_metrics[m]['utilization'] for m in all_model_names]
-        })
-        
-        # Highlight best model
-        def highlight_best(row):
-            if row['Model'] == best_model:
-                return ['background-color: #FFD700; font-weight: bold;'] * len(row)
-            return [''] * len(row)
-        
-        st.dataframe(
-            comparison_df.style.apply(highlight_best, axis=1).format({
-                'Accuracy (%)': '{:.1f}',
-                'Distance': '{:.1f}',
-                'Utilization (%)': '{:.1f}'
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
+
+# Computer Vision Module
+st.markdown("---")
+st.subheader("📷 Drone Camera Module - Object Detection")
+
+# YOLO Status
+yolo_status = st.empty()
+if YOLO_AVAILABLE:
+    try:
+        model = load_yolo_model()
+        if model is not None:
+            yolo_status.success("✅ YOLOv8 Model Ready")
+        else:
+            yolo_status.info("🔄 Loading YOLOv8 model (first run may take time)...")
+    except Exception as e:
+        yolo_status.warning(f"⚠️ YOLOv8 Error: {str(e)}")
+else:
+    yolo_status.warning("⚠️ YOLOv8 not installed. Install with: `pip install ultralytics`")
+
+col_cam1, col_cam2 = st.columns([1, 1])
+
+with col_cam1:
+    st.markdown("### Upload Aerial Image")
+    uploaded_file = st.file_uploader(
+        "Choose an image for object detection",
+        type=['jpg', 'jpeg', 'png'],
+        help="Upload an aerial image to detect people, vehicles, buildings, or obstacles"
+    )
     
-    if st.button("❌ Close", use_container_width=True):
-        st.session_state.show_data_page = False
-        st.rerun()
+    if uploaded_file is not None:
+        image = Image.open(uploaded_file)
+        st.image(image, caption="Uploaded Image", use_container_width=True)
+        
+        if st.button("🔍 Run Object Detection", use_container_width=True):
+            with st.spinner("Running YOLOv8 object detection..."):
+                # Convert PIL to numpy array
+                img_array = np.array(image)
+                
+                # Run detection
+                model = load_yolo_model()
+                if model:
+                    annotated_img, detections = detect_objects_yolo(img_array, model)
+                    
+                    # Display results
+                    st.session_state.last_detection = {
+                        'image': annotated_img,
+                        'detections': detections,
+                        'location': 'Uploaded Image'
+                    }
+                    st.rerun()
+                else:
+                    st.error("YOLOv8 model not available. Please check installation.")
+
+with col_cam2:
+    st.markdown("### Detection Results")
+    
+    if 'last_detection' in st.session_state:
+        detection_data = st.session_state.last_detection
+        
+        # Display annotated image
+        st.image(detection_data['image'], caption="Detected Objects", use_container_width=True)
+        
+        # Display detection details
+        if detection_data['detections']:
+            st.success(f"✅ Found {len(detection_data['detections'])} objects")
+            
+            detection_df = pd.DataFrame(detection_data['detections'])
+            st.dataframe(
+                detection_df.style.format({'confidence': '{:.2%}'}),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Add to history
+            st.session_state.detection_history.append({
+                'timestamp': time.time(),
+                'location': detection_data['location'],
+                'count': len(detection_data['detections']),
+                'objects': detection_data['detections']
+            })
+        else:
+            st.info("No relevant objects detected")
+    else:
+        st.info("👆 Upload an image and click 'Run Object Detection' to see results")
+
+# Auto-trigger detection simulation
+st.markdown("---")
+st.subheader("🤖 Autonomous Intelligence - Area Scanning")
+
+# Check if any drones have reached their destinations
+auto_scan_triggered = False
+scanning_drones = []
+
+for assignment in assignments:
+    if st.session_state.animation_frame >= 95:
+        drone = next((d for d in st.session_state.drones if d['id'] == assignment['drone_id']), None)
+        if drone and drone['status'] != 'scanning':
+            scanning_drones.append({
+                'drone_id': assignment['drone_id'],
+                'destination': assignment['destination'],
+                'assignment': assignment
+            })
+            drone['status'] = 'scanning'
+            auto_scan_triggered = True
+
+# Display auto-scan results
+if auto_scan_triggered and scanning_drones:
+    for scan_info in scanning_drones:
+        st.success(f"🚁 **Drone {scan_info['drone_id']}** reached **{scan_info['destination']}**!")
+        st.info(f"📡 **Autonomous area scan initiated** at {scan_info['destination']}...")
+        
+        # Auto-run detection if image is available
+        if uploaded_file is not None:
+            with st.spinner(f"Running YOLOv8 detection for Drone {scan_info['drone_id']}..."):
+                image = Image.open(uploaded_file)
+                img_array = np.array(image)
+                model = load_yolo_model()
+                if model:
+                    annotated_img, detections = detect_objects_yolo(img_array, model)
+                    
+                    col_scan1, col_scan2 = st.columns([1, 1])
+                    
+                    with col_scan1:
+                        st.image(annotated_img, caption=f"Auto-scan at {scan_info['destination']}", use_container_width=True)
+                    
+                    with col_scan2:
+                        if detections:
+                            st.success(f"✅ **{len(detections)} objects detected**")
+                            detection_summary = pd.DataFrame(detections)
+                            st.dataframe(detection_summary, use_container_width=True, hide_index=True)
+                            
+                            # Add to history
+                            st.session_state.detection_history.append({
+                                'timestamp': time.time(),
+                                'location': scan_info['destination'],
+                                'count': len(detections),
+                                'objects': detections,
+                                'drone_id': scan_info['drone_id']
+                            })
+                        else:
+                            st.info("No objects detected in scanned area")
+                else:
+                    st.warning("YOLOv8 model not available")
+        else:
+            st.warning("⚠️ Upload an image to enable auto-detection on arrival")
+
+# Manual trigger button
+if st.button("🎯 Simulate Drone Arrival & Auto-Scan", use_container_width=True):
+    if assignments:
+        assignment = assignments[0]
+        destination = assignment['destination']
+        
+        st.success(f"🚁 Drone {assignment['drone_id']} reached {destination}!")
+        st.info("📡 Initiating autonomous area scan...")
+        
+        if uploaded_file is not None:
+            image = Image.open(uploaded_file)
+            img_array = np.array(image)
+            model = load_yolo_model()
+            if model:
+                annotated_img, detections = detect_objects_yolo(img_array, model)
+                
+                st.image(annotated_img, caption=f"Auto-scan at {destination}", use_container_width=True)
+                
+                if detections:
+                    st.success(f"✅ Auto-detected {len(detections)} objects at {destination}")
+                    detection_summary = pd.DataFrame(detections)
+                    st.dataframe(detection_summary, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No objects detected in scanned area")
+            else:
+                st.warning("YOLOv8 model not available")
+        else:
+            st.warning("⚠️ Please upload an image first to simulate detection")
+    else:
+        st.warning("⚠️ No active assignments. Start simulation first.")
+
+# Detection History
+if st.session_state.detection_history:
+    st.markdown("---")
+    st.subheader("📜 Detection History")
+    
+    history_df = pd.DataFrame([
+        {
+            'Time': time.strftime('%H:%M:%S', time.localtime(h['timestamp'])),
+            'Location': h['location'],
+            'Objects Found': h['count'],
+            'Details': ', '.join([f"{d['class']} ({d['confidence']:.0%})" for d in h['objects'][:3]])
+        }
+        for h in st.session_state.detection_history[-10:]
+    ])
+    
+    st.dataframe(history_df, use_container_width=True, hide_index=True)
 
 # Footer
 st.markdown("---")
-st.markdown("**Thapar Auto Optimization System** | Built with Streamlit & ML Models")
+st.markdown("""
+<div style="text-align: center; color: #666; padding: 20px;">
+    <p><strong>🚁 AI-Powered Autonomous Drone Fleet System</strong></p>
+    <p>Built with Streamlit • YOLOv8 • Advanced AI Optimization Algorithms</p>
+    <p style="font-size: 0.9rem; margin-top: 10px;">Ready for Hackathon Demo 🚀</p>
+</div>
+""", unsafe_allow_html=True)
