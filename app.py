@@ -14,22 +14,14 @@ import io
 import base64
 import threading
 
-# YOLOv8 imports (with fallback if not installed)
-YOLO_MODEL = None
-YOLO_AVAILABLE = False
-
-try:
+# YOLOv8 imports (Streamlit deployment-friendly)
+@st.cache_resource
+def load_yolo():
     from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-    # Load model once at startup
-    try:
-        YOLO_MODEL = YOLO('yolov8n.pt')  # nano model for speed
-        st.session_state.yolo_loaded = True
-    except Exception as e:
-        st.session_state.yolo_loaded = False
-        st.session_state.yolo_error = str(e)
-except ImportError:
-    YOLO_AVAILABLE = False
+    return YOLO("yolov8n.pt")
+
+YOLO_AVAILABLE = True
+YOLO_MODEL = None
 
 # Page configuration
 st.set_page_config(
@@ -374,10 +366,8 @@ def ensemble_optimization(drones, destinations):
 @st.cache_resource
 def load_yolo_model():
     """Load YOLOv8 model with caching"""
-    if not YOLO_AVAILABLE:
-        return None
     try:
-        model = YOLO('yolov8n.pt')
+        model = load_yolo()
         st.session_state.yolo_model_ready = True
         return model
     except Exception as e:
